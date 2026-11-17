@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 lim.py - Linux Log Integrity Monitor
 Detects when someone deletes, truncates, or edits log files to hide an attack.
@@ -18,7 +19,7 @@ def load_config(name="config.json"):
     with open(config_path) as f:
         return json.load(f)
 
-def fingerprint(path):
+def fingerprint(path, old_size=None):
     # Get file info from Linux (inode, size, owner, permissions, timestamp)
     try:
         info = os.stat(path)
@@ -28,12 +29,22 @@ def fingerprint(path):
     sha = hashlib.sha256()
     size = 0
     lines = 0
+    old_part_hash = None
+    if old_size == 0:
+        old_part_hash = sha.hexdigest()
+
     with open(path, "rb") as f:
         while True:
             chunk = f.read(1024 * 1024)
             if not chunk:
                 break
-            sha.update(chunk)
+            if old_part_hash is None and old_size is not None and size + len(chunk) >= old_size:
+                cut = old_size - size
+                sha.update(chunk[:cut])
+                old_part_hash = sha.hexdigest()  # hash of the first old_size bytes
+                sha.update(chunk[cut:])
+            else:
+                sha.update(chunk)
             size += len(chunk)
             lines += chunk.count(b"\n")
 
@@ -42,7 +53,8 @@ def fingerprint(path):
         "inode": info.st_ino,               
         "size": size,                       
         "lines": lines,
-        "hash": sha.hexdigest(),           
+        "hash": sha.hexdigest(),
+        "old_part_hash": old_part_hash,    
         "mode": oct(info.st_mode & 0o777),  
         "owner": info.st_uid,              
         "mtime": info.st_mtime,             
@@ -86,17 +98,87 @@ def cmd_init(config, force):
     save_baseline(config, files)
     print(f"\nBaseline saved to {baseline_path(config)}")
 
+def compare(old, new):
+
+    # File didn't exist before this check
+    if not old["exists"]:
+        return [("CREATED", "file appeared")] if new["exists"] else []
+
+    # File is deleted
+    if not new["exists"]:
+        return [("DELETED", f"file removed ({old['lines']} lines of log history gone)")]
+
+    events = []
+
+    # File at this path is different
+    if new["inode"] != old["inode"]:
+        events.append(("REPLACED", f"different file at this path (inode {old['inode']} -> "
+                                   f"{new['inode']}), {old['lines']} -> {new['lines']} lines"))
+    # File decreased in size 
+    elif new["size"] < old["size"]:
+        events.append(("TRUNCATED", f"{old['size']} -> {new['size']} bytes, "
+                                    f"{old['lines']} -> {new['lines']} lines"))
+    # Same file but the hash that already existed changed
+    elif new["old_part_hash"] != old["hash"]:
+        events.append(("MODIFIED", "earlier log content was changed in place"))
+
+    # Metadata tampering
+    if new["mode"] != old["mode"]:
+        events.append(("PERMISSIONS", f"{old['mode']} -> {new['mode']}"))
+    if new["owner"] != old["owner"]:
+        events.append(("OWNERSHIP", f"owner uid {old['owner']} -> {new['owner']}"))
+    if new["mtime"] < old["mtime"]:
+        events.append(("TIMESTAMP", "modified time moved backwards (faked with touch -d?)"))
+
+    return events
+
+def cmd_check(config):
+    if not os.path.exists(baseline_path(config)):
+        print("No baseline found. Run 'init' first.")
+        return
+
+    baseline = load_baseline(config)
+    problems = 0
+
+    for path in config["watch_files"]:
+        old = baseline.get(path, {"exists": False})
+        new = fingerprint(path, old_size=old["size"] if old["exists"] else None)
+
+        events = compare(old, new)
+        if not events:
+            grew = new.get("size", 0) - old.get("size", 0)
+            if not new["exists"]:
+                note = "(still missing)"
+            elif grew > 0:
+                note = f"(+{grew} bytes appended)"
+            else:
+                note = "(unchanged)"
+            print(f"  OK     {path} {note}")
+        for event, detail in events:
+            print(f"  ALERT  {event:<12} {path}: {detail}")
+            problems += 1
+
+        # The current state becomes the new known-good baseline
+        new.pop("old_part_hash", None)
+        baseline[path] = new
+
+    save_baseline(config, baseline)
+    print(f"\n{problems} problem(s) found." if problems else "\nNo tampering detected.")
+
 def main():
     parser = argparse.ArgumentParser(description="Linux Log Integrity Monitor")
     parser.add_argument("-c", "--config", default="config.json", help="config file name")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="save the baseline")
     init.add_argument("--force", action="store_true", help="overwrite existing baseline")
+    sub.add_parser("check", help="compare files to the baseline")
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.command == "init":
         cmd_init(config, args.force)
+    elif args.command == "check":
+        cmd_check(config)
 
 if __name__ == "__main__":
     main()
