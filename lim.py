@@ -3,10 +3,12 @@ lim.py - Linux Log Integrity Monitor
 Detects when someone deletes, truncates, or edits log files to hide an attack.
 """
 
+import argparse
 import hashlib
 import json
 import os
 import sys
+from datetime import datetime
 
 # Folder this script lives in, so config.json is found no matter where you run it from
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,10 +48,55 @@ def fingerprint(path):
         "mtime": info.st_mtime,             
     }
 
+def baseline_path(config):
+    return os.path.join(config["state_dir"], "baseline.json")
+
+def save_baseline(config, files):
+    os.makedirs(config["state_dir"], exist_ok=True)
+    #Makes folder on accessible from root
+    os.chmod(config["state_dir"], 0o700)
+
+    data = {"saved": datetime.now().isoformat(timespec="seconds"), "files": files}
+    path = baseline_path(config)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(path, 0o600)
+
+def load_baseline(config):
+    with open(baseline_path(config)) as f:
+        return json.load(f)["files"]
+
+
+def cmd_init(config, force):
+    if os.path.exists(baseline_path(config)) and not force:
+        print("A baseline already exists. Use 'init --force' to replace it.")
+        return
+
+    print("Taking baseline...\n")
+    files = {}
+    for path in config["watch_files"]:
+        fp = fingerprint(path)
+        files[path] = fp
+        if fp["exists"]:
+            print(f"  OK       {path}  ({fp['size']} bytes, {fp['lines']} lines, "
+                  f"hash {fp['hash'][:12]}...)")
+        else:
+            print(f"  MISSING  {path}")
+
+    save_baseline(config, files)
+    print(f"\nBaseline saved to {baseline_path(config)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Linux Log Integrity Monitor")
+    parser.add_argument("-c", "--config", default="config.json", help="config file name")
+    sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser("init", help="save the baseline")
+    init.add_argument("--force", action="store_true", help="overwrite existing baseline")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    if args.command == "init":
+        cmd_init(config, args.force)
 
 if __name__ == "__main__":
-    config = load_config(sys.argv[1] if len(sys.argv) > 1 else "config.json")
-    for path in config["watch_files"]:
-        print(path)
-        print(json.dumps(fingerprint(path), indent=2))
-        print()
+    main()

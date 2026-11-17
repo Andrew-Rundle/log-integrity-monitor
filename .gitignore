@@ -8,6 +8,7 @@ __pycache__/
 
 test_logs/
 test_config.json
+test_state/
 
 # Distribution / packaging
 .Python
