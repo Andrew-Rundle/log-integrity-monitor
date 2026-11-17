@@ -1,0 +1,10 @@
+{
+  "watch_files": [
+    "/var/log/auth.log",
+    "/var/log/syslog",
+    "/var/log/kern.log"
+  ],
+  "interval_seconds": 3,
+  "state_dir": "/var/lib/lim",
+  "alert_log": "/var/log/lim_alerts.log"
+}
