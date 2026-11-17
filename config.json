@@ -6,5 +6,6 @@
   ],
   "interval_seconds": 3,
   "state_dir": "/var/lib/lim",
-  "alert_log": "/var/log/lim_alerts.log"
+  "alert_log": "/var/log/lim_alerts.log",
+  "use_syslog": true
 }

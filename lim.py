@@ -4,12 +4,17 @@ lim.py - Linux Log Integrity Monitor
 Detects when someone deletes, truncates, or edits log files to hide an attack.
 """
 
+import sys
 import argparse
 import hashlib
 import json
 import os
-import sys
 from datetime import datetime
+
+try:
+    import syslog          
+except ImportError:
+    syslog = None
 
 # Folder this script lives in, so config.json is found no matter where you run it from
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -98,26 +103,55 @@ def cmd_init(config, force):
     save_baseline(config, files)
     print(f"\nBaseline saved to {baseline_path(config)}")
 
-def compare(old, new):
+def find_rotated(path, old):
+    """Look for the old content in a neighboring file. Returns that file's name if found, otherwise None."""
+    folder, name = os.path.split(path)
+    for other in os.listdir(folder or "."):
+        if other == name or not other.startswith(name) or other.endswith(".gz"):
+            continue
+        candidate = os.path.join(folder, other)
+        if not os.path.isfile(candidate) or os.path.getsize(candidate) < old["size"]:
+            continue
+        # Is the old log content still intact at the start of this file?
+        if fingerprint(candidate, old_size=old["size"])["old_part_hash"] == old["hash"]:
+            return other
+    return None
+
+def compare(path, old, new):
 
     # File didn't exist before this check
     if not old["exists"]:
-        return [("CREATED", "file appeared")] if new["exists"] else []
+        if not new["exists"]:
+            new["rotated_to"] = old.get("rotated_to")  
+            return []
+        if old.get("rotated_to"):
+            return [("ROTATED", f"new log file created after rotation to {old['rotated_to']}")]
+        return [("CREATED", "file appeared")]
 
     # File is deleted
     if not new["exists"]:
+        rotated = find_rotated(path, old)
+        if rotated:
+            new["rotated_to"] = rotated
+            return [("ROTATED", f"moved to {rotated}, waiting for new file")]
         return [("DELETED", f"file removed ({old['lines']} lines of log history gone)")]
 
     events = []
 
     # File at this path is different
     if new["inode"] != old["inode"]:
-        events.append(("REPLACED", f"different file at this path (inode {old['inode']} -> "
-                                   f"{new['inode']}), {old['lines']} -> {new['lines']} lines"))
+        rotated = find_rotated(path, old)
+        if rotated:
+            return [("ROTATED", f"rotated to {rotated}")]
+        
+        events.append(("REPLACED", f"different file at this path (inode {old['inode']} -> " f"{new['inode']}), {old['lines']} -> {new['lines']} lines"))
     # File decreased in size 
     elif new["size"] < old["size"]:
-        events.append(("TRUNCATED", f"{old['size']} -> {new['size']} bytes, "
-                                    f"{old['lines']} -> {new['lines']} lines"))
+        rotated = find_rotated(path, old)
+        if rotated:
+            return [("ROTATED", f"copytruncate rotation, old content copied to {rotated}")]
+        events.append(("TRUNCATED", f"{old['size']} -> {new['size']} bytes, " f"{old['lines']} -> {new['lines']} lines"))
+    
     # Same file but the hash that already existed changed
     elif new["old_part_hash"] != old["hash"]:
         events.append(("MODIFIED", "earlier log content was changed in place"))
@@ -132,6 +166,34 @@ def compare(old, new):
 
     return events
 
+COLORS = {"ALERT": "\033[1;31m", "INFO": "\033[36m", "OK": "\033[32m"} 
+RESET = "\033[0m"
+USE_COLOR = sys.stdout.isatty()  
+
+
+def color(level, text):
+    return f"{COLORS[level]}{text}{RESET}" if USE_COLOR else text
+
+
+def send_alert(config, level, event, path, detail):
+    """Report a finding in 3 places: terminal, alert log file, and syslog."""
+    message = f"[{level}] {event} {path}: {detail}"
+
+    print(color(level, f"  {level:<6} {event:<12}") + f" {path}: {detail}")
+
+    alert_log = config.get("alert_log")
+    if alert_log:
+        try:
+            with open(alert_log, "a") as f:
+                f.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
+        except OSError as e:
+            print(f"  (could not write to {alert_log}: {e})")
+
+    if syslog and config.get("use_syslog", True):
+        priority = syslog.LOG_WARNING if level == "ALERT" else syslog.LOG_INFO
+        syslog.openlog("lim", syslog.LOG_PID, syslog.LOG_DAEMON)
+        syslog.syslog(priority, message)
+
 def cmd_check(config):
     if not os.path.exists(baseline_path(config)):
         print("No baseline found. Run 'init' first.")
@@ -144,7 +206,7 @@ def cmd_check(config):
         old = baseline.get(path, {"exists": False})
         new = fingerprint(path, old_size=old["size"] if old["exists"] else None)
 
-        events = compare(old, new)
+        events = compare(path, old, new)
         if not events:
             grew = new.get("size", 0) - old.get("size", 0)
             if not new["exists"]:
@@ -153,10 +215,14 @@ def cmd_check(config):
                 note = f"(+{grew} bytes appended)"
             else:
                 note = "(unchanged)"
-            print(f"  OK     {path} {note}")
+            print(color("OK", "  OK    ") + f" {path} {note}")
+
         for event, detail in events:
-            print(f"  ALERT  {event:<12} {path}: {detail}")
-            problems += 1
+            if event == "ROTATED":  
+                send_alert(config, "INFO", event, path, detail)
+            else:
+                send_alert(config, "ALERT", event, path, detail)
+                problems += 1
 
         # The current state becomes the new known-good baseline
         new.pop("old_part_hash", None)
@@ -164,6 +230,7 @@ def cmd_check(config):
 
     save_baseline(config, baseline)
     print(f"\n{problems} problem(s) found." if problems else "\nNo tampering detected.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Linux Log Integrity Monitor")
