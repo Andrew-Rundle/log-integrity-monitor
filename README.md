@@ -2,7 +2,7 @@
 
 A tool that detects when somone tampers with Linux log files as an attempt to hide an attack. 
 
-**Built and tested on Ubuntu 26.04. Runs as a `systemd` service. Written in python and only uses standard libary.
+**Built and tested on Ubuntu 26.04.** Runs as a `systemd` service. Written in python and only uses standard libary.
 
 ## Why this matters
 
