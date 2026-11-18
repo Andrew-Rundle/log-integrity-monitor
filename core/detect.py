@@ -6,6 +6,10 @@ from .fingerprint import fingerprint
 def find_rotated(path, old):
     """Look for the old content in a neighboring file (e.g. syslog -> syslog.1).
     Returns that file's name if found, otherwise None."""
+
+    if old["size"] == 0:
+        return None
+    
     folder, name = os.path.split(path)
     for other in os.listdir(folder or "."):
         # Only files like syslog.1, syslog-20261117 (skip compressed .gz archives)
