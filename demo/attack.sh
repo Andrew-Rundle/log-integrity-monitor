@@ -103,32 +103,26 @@ scene_5() {
     after
 }
 
-scene_6() {
-    title 6 "Fake kern.log's modification time with touch -d"
-    expect "${RED}TIMESTAMP${RESET} - modified time moved backwards"
-    before
-    run "touch -d '2020-01-01 00:00:00' $KERN"
-    after
-}
 
-scene_7() {
-    title 7 "Make kern.log world-writable with chmod"
+
+scene_6() {
+    title 6 "Make kern.log world-writable with chmod"
     expect "${RED}PERMISSIONS${RESET} - mode changed (e.g. 0o640 -> 0o666)"
     before
     run "chmod 666 $KERN"
     after
 }
 
-scene_8() {
-    title 8 "Delete syslog entirely"
+scene_7() {
+    title 7 "Delete syslog entirely"
     expect "${RED}DELETED${RESET} - watched file is gone"
     before
     run "rm -f $SYSLOG"
     after
 }
 
-scene_9() {
-    title 9 "Kill the lim monitor"
+scene_7() {
+    title 7 "Kill the lim monitor"
     if systemctl is-active --quiet lim 2>/dev/null; then
         expect "systemd restarts lim in ~5s, then it reports ${RED}MONITOR_GAP${RESET}"
         before
@@ -144,16 +138,16 @@ scene_9() {
     after
 }
 
-scene_10() {
-    title 10 "Tamper with lim's own records (the hash chain)"
+scene_9() {
+    title 9 "Tamper with lim's own records (the hash chain)"
     expect "${RED}CHAIN_TAMPERED${RESET} while running; 'verify' pinpoints the record"
     before
     run "echo '{\"fake\":\"injected record\"}' >> $CHAIN"
     after
 }
 
-scene_11() {
-    title 11 "Run a read-only audit"
+scene_10() {
+    title 10 "Run a read-only audit"
     expect "a report of the chain, the baseline, and each watched file"
     before
     if [ -f /opt/lim/lim.py ]; then
@@ -212,7 +206,7 @@ backup_logs
 echo "Run 'sudo bash demo/attack.sh --cleanup' afterwards to restore."
 
 ONLY="$1"
-for n in 1 2 3 4 5 6 7 8 9 10 11; do
+for n in 1 2 3 4 5 6 7 8 9 10; do
     [ -n "$ONLY" ] && [ "$ONLY" != "$n" ] && continue
     "scene_$n"
 done
