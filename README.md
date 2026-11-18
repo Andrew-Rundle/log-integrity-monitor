@@ -44,7 +44,7 @@ Hash chain     ← protected by itself         (detects tampering with the recor
 
 **2. Comparison.** During each check, `LIM` re-fingerprints each file. It also just compares the first N bytes where N is the size of recorded at the last check. If the prefix still matches, the old content is untouched and the file just grew, meaning it was a normal append. If the prefixes don't match, the file shrank or inode changes, and `LIM` reports the tampering with classification.
 
-**3. Rotation awareness."" Before alerting that a file was shrunken or replaced `LIM` will check to see if the old content was moved to a neighbor file. If it was, info reported as `ROTATED`, otherwise tampering was involved.
+**3. Rotation awareness.** Before alerting that a file was shrunken or replaced `LIM` will check to see if the old content was moved to a neighbor file. If it was, info reported as `ROTATED`, otherwise tampering was involved.
 
 **4. Hash Chain.** Every record `LIM` writes - alerts, baseline saves, start/stop avents - is appended to `chain.log` and includes the hash of the previous record. If any record is edited or deleted then the link breaks and `LIM` sends an alert. The baselines hash is stored in the chain protecting the baseline json from being silently rewritten.
 
