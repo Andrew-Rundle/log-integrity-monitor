@@ -121,8 +121,8 @@ scene_7() {
     after
 }
 
-scene_7() {
-    title 7 "Kill the lim monitor"
+scene_8() {
+    title 8 "Kill the lim monitor"
     if systemctl is-active --quiet lim 2>/dev/null; then
         expect "systemd restarts lim in ~5s, then it reports ${RED}MONITOR_GAP${RESET}"
         before
