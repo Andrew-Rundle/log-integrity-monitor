@@ -106,10 +106,10 @@ scene_5() {
 
 
 scene_6() {
-    title 6 "Make kern.log world-writable with chmod"
+    title 6 "Make syslog world-writable with chmod"
     expect "${RED}PERMISSIONS${RESET} - mode changed (e.g. 0o640 -> 0o666)"
     before
-    run "chmod 666 $KERN"
+    run "chmod 666 $SYSLOG"
     after
 }
 
