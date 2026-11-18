@@ -96,10 +96,10 @@ scene_4() {
 }
 
 scene_5() {
-    title 5 "Truncate auth.log to zero"
+    title 5 "Truncate syslog to zero"
     expect "${RED}TRUNCATED${RESET} - file shrank, no copy of the old content exists"
     before
-    run "truncate -s 0 $AUTH"
+    run "truncate -s 0 $SYSLOG"
     after
 }
 
