@@ -78,6 +78,7 @@ def save_baseline(config, files):
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     os.chmod(path, 0o600)
+    add_to_chain(config, "BASELINE", baseline_hash=baseline_hash(files))
 
 def load_baseline(config):
     with open(baseline_path(config)) as f:
@@ -169,15 +170,98 @@ def compare(path, old, new):
 COLORS = {"ALERT": "\033[1;31m", "INFO": "\033[36m", "OK": "\033[32m"} 
 RESET = "\033[0m"
 USE_COLOR = sys.stdout.isatty()  
-
+GENESIS = "0" * 64
 
 def color(level, text):
     return f"{COLORS[level]}{text}{RESET}" if USE_COLOR else text
 
+def chain_path(config):
+    return os.path.join(config["state_dir"], "chain.log")
+
+
+def record_hash(record):
+    """SHA-256 of a record's contents (everything except its own hash)."""
+    body = {k: v for k, v in record.items() if k != "hash"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+def baseline_hash(files):
+    """SHA-256 of the baseline contents, so we can tell if baseline.json was edited."""
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+def last_record(config):
+    try:
+        with open(chain_path(config)) as f:
+            lines = [line for line in f if line.strip()]
+        return json.loads(lines[-1]) if lines else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def add_to_chain(config, event, **data):
+    """Append a record that is linked to the previous one by its hash."""
+    last = last_record(config)
+    record = {
+        "seq": last.get("seq", 0) + 1 if last else 1,      
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        **data,
+        "prev": last.get("hash", GENESIS) if last else GENESIS,  
+    }
+    record["hash"] = record_hash(record)
+    os.makedirs(config["state_dir"], exist_ok=True)
+    with open(chain_path(config), "a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    os.chmod(chain_path(config), 0o600)
+    return record
+
+def verify_chain(config):
+    """Walk the whole chain. Returns (list of problems, last recorded baseline hash)."""
+    if not os.path.exists(chain_path(config)):
+        return ["chain file is missing"], None
+
+    problems = []
+    prev = GENESIS
+    expected_seq = 1
+    last_baseline = None
+    with open(chain_path(config)) as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                problems.append(f"line {n}: unreadable (corrupted)")
+                prev = None
+                continue
+            if record.get("seq") != expected_seq:
+                problems.append(f"line {n}: expected record #{expected_seq} but found "
+                                f"#{record.get('seq')} (records deleted or inserted)")
+            if prev is not None and record.get("prev") != prev:
+                problems.append(f"line {n}: link to the previous record is broken")
+            if record_hash(record) != record.get("hash"):
+                problems.append(f"line {n}: record #{record.get('seq')} was altered")
+            if "baseline_hash" in record:
+                last_baseline = record["baseline_hash"]
+            prev = record.get("hash")
+            expected_seq = (record.get("seq") or expected_seq) + 1
+    return problems, last_baseline
+
+def check_own_records(config, files):
+    """Before trusting the baseline, make sure nobody tampered with our records."""
+    problems, last_baseline = verify_chain(config)
+    found = 0
+    if problems:
+        send_alert(config, "ALERT", "CHAIN_BROKEN", chain_path(config), "; ".join(problems[:3]))
+        found += 1
+    if last_baseline and baseline_hash(files) != last_baseline:
+        send_alert(config, "ALERT", "BASELINE_TAMPERED", baseline_path(config),
+                   "baseline.json does not match the hash recorded in the chain")
+        found += 1
+    return found
 
 def send_alert(config, level, event, path, detail):
     """Report a finding in 3 places: terminal, alert log file, and syslog."""
-    message = f"[{level}] {event} {path}: {detail}"
+    record = add_to_chain(config, event, level=level, path=path, detail=detail)
+    message = f"[{level}] {event} {path}: {detail} (chain #{record['seq']} {record['hash'][:12]})"
 
     print(color(level, f"  {level:<6} {event:<12}") + f" {path}: {detail}")
 
@@ -200,7 +284,7 @@ def cmd_check(config):
         return
 
     baseline = load_baseline(config)
-    problems = 0
+    problems = check_own_records(config, baseline)
 
     for path in config["watch_files"]:
         old = baseline.get(path, {"exists": False})
@@ -231,6 +315,40 @@ def cmd_check(config):
     save_baseline(config, baseline)
     print(f"\n{problems} problem(s) found." if problems else "\nNo tampering detected.")
 
+def cmd_verify(config):
+    """Read-only audit: checks the chain, the baseline, and the files. Changes nothing."""
+    print("Hash chain:")
+    problems, last_baseline = verify_chain(config)
+    if problems:
+        for p in problems:
+            print(color("ALERT", "  FAIL  ") + p)
+    else:
+        print(color("OK", "  OK    ") + f"{last_record(config)['seq']} records, all links intact")
+
+    print("Baseline:")
+    if not os.path.exists(baseline_path(config)):
+        print(color("ALERT", "  FAIL  ") + "baseline.json is missing")
+        return
+    files = load_baseline(config)
+    if last_baseline and baseline_hash(files) == last_baseline:
+        print(color("OK", "  OK    ") + "matches the hash recorded in the chain")
+    else:
+        problems.append("baseline")
+        print(color("ALERT", "  FAIL  ") + "does NOT match the chain (baseline.json was edited)")
+
+    print("Log files:")
+    for path in config["watch_files"]:
+        old = files.get(path, {"exists": False})
+        new = fingerprint(path, old_size=old["size"] if old["exists"] else None)
+        events = [e for e in compare(path, old, new) if e[0] != "ROTATED"]
+        if not events:
+            print(color("OK", "  OK    ") + path)
+        for event, detail in events:
+            problems.append(event)
+            print(color("ALERT", f"  {event:<12}") + f" {path}: {detail}")
+
+    print(color("ALERT", f"\n{len(problems)} problem(s) found.") if problems
+          else color("OK", "\nEverything verified."))
 
 def main():
     parser = argparse.ArgumentParser(description="Linux Log Integrity Monitor")
@@ -239,6 +357,7 @@ def main():
     init = sub.add_parser("init", help="save the baseline")
     init.add_argument("--force", action="store_true", help="overwrite existing baseline")
     sub.add_parser("check", help="compare files to the baseline")
+    sub.add_parser("verify", help="read-only audit of the chain, baseline, and files")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -246,6 +365,8 @@ def main():
         cmd_init(config, args.force)
     elif args.command == "check":
         cmd_check(config)
+    elif args.command == "verify":
+        cmd_verify(config)
 
 if __name__ == "__main__":
     main()
