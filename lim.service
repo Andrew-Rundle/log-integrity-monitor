@@ -1,0 +1,48 @@
+# systemd service for the Linux Log Integrity Monitor
+# Installed to /etc/systemd/system/lim.service by install.sh
+
+[Unit]
+Description=Linux Log Integrity Monitor (detects log tampering)
+Documentation=https://github.com/Andrew-Rundle/log-integrity-monitor
+# Start after the logging system is up
+After=rsyslog.service
+Wants=rsyslog.service
+
+[Service]
+Type=simple
+# -u = unbuffered output, so alerts show up in the journal immediately
+ExecStart=/usr/bin/python3 -u /opt/lim/lim.py watch
+# If lim is killed or crashes, bring it back after 5 seconds
+Restart=always
+RestartSec=5
+User=root
+
+# --- Hardening: limit what lim itself can do, in case it is ever exploited ---
+# Only keep the root powers lim actually needs: reading/writing protected files
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+# Whole filesystem read-only for lim, except the two places it must write
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lim /var/log
+ProtectHome=yes
+PrivateTmp=yes
+# New files lim creates are private (owner-only)
+UMask=0077
+# Block things a log monitor never needs
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Only local sockets (for syslog) - no network access at all
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+# Start automatically at boot
+WantedBy=multi-user.target
